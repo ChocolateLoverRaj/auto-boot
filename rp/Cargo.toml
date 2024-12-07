@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "{{project-name}}"
+name = "rp"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
@@ -15,6 +15,30 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 # We're using a Pico by default on this template
 rp-pico = "0.9"
+usb-device = "0.3.2"
+usbd-storage = { version = "1.0.0", features = ["bbb", "scsi", "defmt"] }
+# # fugit = { version = "0.3.7", features = ["defmt"] }
+common = { version = "0.1.0", path = "../common" }
+postcard = { version = "1.1.1", features = ["experimental-derive"] }
+panic-halt = "1.0.0"
+usbd-serial = "0.2.2"
+embassy-executor = { version = "0.6.3", features = [
+    "task-arena-size-98304",
+    "arch-cortex-m",
+    "executor-thread",
+    "executor-interrupt",
+    "defmt",
+    "integrated-timers",
+] }
+embassy-futures = "0.1.1"
+# Comment this to run non-embassy bins
+embassy-rp = { version = "0.2.0", features = [
+    "defmt",
+    "unstable-pac",
+    "time-driver",
+    "critical-section-impl",
+] }
+embassy-usb = { version = "0.3.0", features = ["defmt"] }
 
 # but you can use any BSP. Uncomment this to use the pro_micro_rp2040 BSP instead
 # sparkfun-pro-micro-rp2040 = "0.8"
@@ -23,7 +47,9 @@ rp-pico = "0.9"
 # rp2040-hal = { version="0.10", features=["rt", "critical-section-impl"] }
 # rp2040-boot2 = "0.3"
 
-# cargo build/run
+[patch.crates-io]
+postcard = { git = "https://github.com/ChocolateLoverRaj/postcard", branch = "range-max-size" }
+
 [profile.dev]
 codegen-units = 1
 debug = 2

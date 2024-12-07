@@ -1,12 +1,18 @@
 #![no_std]
 #![no_main]
 
+use common::{MessageFromHost, MessageFromMicrocontroller, BLOCK_SIZE, UART_BAUD_RATE};
 use core::mem::MaybeUninit;
+use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::digital::OutputPin;
+use fugit::RateExtU32;
+use postcard::experimental::max_size::MaxSize;
 use rp_pico::hal::clocks::init_clocks_and_plls;
+use rp_pico::hal::gpio::bank0::{Gpio0, Gpio1};
+use rp_pico::hal::uart::{DataBits, StopBits, UartConfig};
 use rp_pico::hal::usb::UsbBus;
-use rp_pico::hal::{Sio, Watchdog};
+use rp_pico::hal::{self, Clock, Sio, Watchdog};
 use rp_pico::pac;
 use usb_device::bus::UsbBusAllocator;
 use usb_device::prelude::*;
@@ -19,7 +25,7 @@ use usbd_storage::transport::TransportError;
 static mut USB_TRANSPORT_BUF: MaybeUninit<[u8; 512]> = MaybeUninit::uninit();
 // 200KiB works on a RP2040 since it has enough RAM
 // The disk contains a README.md file
-static mut STORAGE: [u8; (BLOCKS * BLOCK_SIZE) as usize] = *include_bytes!("../disk.img");
+// static mut STORAGE: [u8; (BLOCKS * BLOCK_SIZE) as usize] = *include_bytes!("../disk.img");
 
 static mut STATE: State = State {
     storage_offset: 0,
@@ -28,10 +34,18 @@ static mut STATE: State = State {
     sense_qualifier: None,
 };
 
-const BLOCK_SIZE: u32 = 512;
-const BLOCKS: u32 = 400;
+// const BLOCKS: u32 = 400;
 const USB_PACKET_SIZE: u16 = 64; // 8,16,32,64
 const MAX_LUN: u8 = 0; // max 0x0F
+
+/// Alias the type for our UART pins to make things clearer.
+type UartPins = (
+    hal::gpio::Pin<Gpio0, hal::gpio::FunctionUart, hal::gpio::PullNone>,
+    hal::gpio::Pin<Gpio1, hal::gpio::FunctionUart, hal::gpio::PullNone>,
+);
+
+/// Alias the type for our UART to make things clearer.
+type Uart = hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -101,6 +115,21 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    let uart_pins = (
+        // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
+        pins.gpio0.reconfigure(),
+        // UART RX (characters received by RP2040) on pin 2 (GPIO1)
+        pins.gpio1.reconfigure(),
+    );
+
+    // Make a UART on the given pins
+    let mut uart: Uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(UART_BAUD_RATE.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+
     let mut led = pins.led.into_push_pull_output();
 
     let mut scsi =
@@ -111,8 +140,8 @@ fn main() -> ! {
 
     let mut usb_device = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0xabcd, 0xabcd))
         .strings(&[StringDescriptors::new(LangID::EN)
-            .manufacturer("Foo Bar")
-            .product("STM32 USB Flash")
+            .manufacturer("Rajas")
+            .product("RP2040 Pretend USB Storage")
             .serial_number("FOOBAR1234567890ABCDEF")])
         .unwrap()
         .self_powered(false)
@@ -134,15 +163,35 @@ fn main() -> ! {
 
         let _ = scsi.poll(|command| {
             led.set_low().unwrap();
-            if let Err(err) = process_command(command) {
+            if let Err(err) = process_command(command, &mut uart) {
                 defmt::error!("{}", err);
             }
         });
     }
 }
 
+fn send_message(uart: &mut Uart, message: &MessageFromMicrocontroller) {
+    let mut buffer = [u8::default(); MessageFromMicrocontroller::POSTCARD_MAX_SIZE];
+    let message = postcard::to_slice(message, &mut buffer).unwrap();
+    uart.write_raw(&(message.len() as u32).to_be_bytes())
+        .unwrap();
+    uart.write_raw(&message).unwrap();
+}
+
+fn receive_message(uart: &mut Uart) -> MessageFromHost {
+    let mut buffer = [u8::default(); size_of::<u32>()];
+    uart.read_full_blocking(&mut buffer).unwrap();
+    let size = u32::from_be_bytes(buffer);
+    let mut buffer = [u8::default(); MessageFromHost::POSTCARD_MAX_SIZE];
+    let mut slice = &mut buffer[..size as usize];
+    uart.read_full_blocking(&mut slice).unwrap();
+    let message = postcard::from_bytes(&mut slice).unwrap();
+    message
+}
+
 fn process_command(
     mut command: Command<ScsiCommand, Scsi<BulkOnly<UsbBus, &mut [u8]>>>,
+    uart: &mut Uart,
 ) -> Result<(), TransportError<BulkOnlyError>> {
     defmt::info!("Handling: {}", command.kind);
 
@@ -192,34 +241,43 @@ fn process_command(
             command.pass();
         },
         ScsiCommand::ReadCapacity10 { .. } => {
+            send_message(uart, &MessageFromMicrocontroller::GetSize);
+            info!("Asked for capacity");
+            let size = match receive_message(uart) {
+                MessageFromHost::Size(size) => size,
+                _ => panic!("Unexpected response"),
+            };
+            info!("Got size: {}", size);
+            let blocks = size.div_ceil(BLOCK_SIZE);
+
             let mut data = [0u8; 8];
-            let _ = &mut data[0..4].copy_from_slice(&u32::to_be_bytes(BLOCKS - 1));
+            let _ = &mut data[0..4].copy_from_slice(&u32::to_be_bytes(blocks - 1));
             let _ = &mut data[4..8].copy_from_slice(&u32::to_be_bytes(BLOCK_SIZE));
             command.try_write_data_all(&data)?;
             command.pass();
         }
-        ScsiCommand::ReadCapacity16 { .. } => {
-            let mut data = [0u8; 16];
-            let _ = &mut data[0..8].copy_from_slice(&u32::to_be_bytes(BLOCKS - 1));
-            let _ = &mut data[8..12].copy_from_slice(&u32::to_be_bytes(BLOCK_SIZE));
-            command.try_write_data_all(&data)?;
-            command.pass();
-        }
-        ScsiCommand::ReadFormatCapacities { .. } => {
-            let mut data = [0u8; 12];
-            let _ = &mut data[0..4].copy_from_slice(&[
-                0x00, 0x00, 0x00, 0x08, // capacity list length
-            ]);
-            let _ = &mut data[4..8].copy_from_slice(&u32::to_be_bytes(BLOCKS as u32)); // number of blocks
-            data[8] = 0x01; //unformatted media
-            let block_length_be = u32::to_be_bytes(BLOCK_SIZE);
-            data[9] = block_length_be[1];
-            data[10] = block_length_be[2];
-            data[11] = block_length_be[3];
+        // ScsiCommand::ReadCapacity16 { .. } => {
+        //     let mut data = [0u8; 16];
+        //     let _ = &mut data[0..8].copy_from_slice(&u32::to_be_bytes(BLOCKS - 1));
+        //     let _ = &mut data[8..12].copy_from_slice(&u32::to_be_bytes(BLOCK_SIZE));
+        //     command.try_write_data_all(&data)?;
+        //     command.pass();
+        // }
+        // ScsiCommand::ReadFormatCapacities { .. } => {
+        //     let mut data = [0u8; 12];
+        //     let _ = &mut data[0..4].copy_from_slice(&[
+        //         0x00, 0x00, 0x00, 0x08, // capacity list length
+        //     ]);
+        //     let _ = &mut data[4..8].copy_from_slice(&u32::to_be_bytes(BLOCKS as u32)); // number of blocks
+        //     data[8] = 0x01; //unformatted media
+        //     let block_length_be = u32::to_be_bytes(BLOCK_SIZE);
+        //     data[9] = block_length_be[1];
+        //     data[10] = block_length_be[2];
+        //     data[11] = block_length_be[3];
 
-            command.try_write_data_all(&data)?;
-            command.pass();
-        }
+        //     command.try_write_data_all(&data)?;
+        //     command.pass();
+        // }
         ScsiCommand::Read { lba, len } => unsafe {
             let lba = lba as u32;
             let len = len as u32;
@@ -229,34 +287,44 @@ fn process_command(
 
                 // Uncomment this in order to push data in chunks smaller than a USB packet.
                 // let end = min(start + USB_PACKET_SIZE as usize - 1, end);
-
+                const MAX_BUFFER_SIZE: usize = USB_PACKET_SIZE as usize;
+                let buffer_size = (end - start).min(MAX_BUFFER_SIZE);
+                let end = start + buffer_size;
                 defmt::info!("Data transfer >>>>>>>> [{}..{}]", start, end);
-                let count = command.write_data(&mut STORAGE[start..end])?;
+                send_message(
+                    uart,
+                    &MessageFromMicrocontroller::Read(start as u32..end as u32),
+                );
+                // It's ok if in the final chunk not the complete amount is received cuz 0s after that is ok.
+                let mut buffer = [0; MAX_BUFFER_SIZE];
+                let mut slice = &mut buffer[..buffer_size];
+                uart.read_full_blocking(slice);
+                let count = command.write_data(slice)?;
                 STATE.storage_offset += count;
             } else {
                 command.pass();
                 STATE.storage_offset = 0;
             }
         },
-        ScsiCommand::Write { lba, len } => unsafe {
-            let lba = lba as u32;
-            let len = len as u32;
-            if STATE.storage_offset != (len * BLOCK_SIZE) as usize {
-                let start = (BLOCK_SIZE * lba) as usize + STATE.storage_offset;
-                let end = (BLOCK_SIZE * lba) as usize + (BLOCK_SIZE * len) as usize;
-                defmt::info!("Data transfer <<<<<<<< [{}..{}]", start, end);
-                let count = command.read_data(&mut STORAGE[start..end])?;
-                STATE.storage_offset += count;
+        // ScsiCommand::Write { lba, len } => unsafe {
+        //     let lba = lba as u32;
+        //     let len = len as u32;
+        //     if STATE.storage_offset != (len * BLOCK_SIZE) as usize {
+        //         let start = (BLOCK_SIZE * lba) as usize + STATE.storage_offset;
+        //         let end = (BLOCK_SIZE * lba) as usize + (BLOCK_SIZE * len) as usize;
+        //         defmt::info!("Data transfer <<<<<<<< [{}..{}]", start, end);
+        //         let count = command.read_data(&mut STORAGE[start..end])?;
+        //         STATE.storage_offset += count;
 
-                if STATE.storage_offset == (len * BLOCK_SIZE) as usize {
-                    command.pass();
-                    STATE.storage_offset = 0;
-                }
-            } else {
-                command.pass();
-                STATE.storage_offset = 0;
-            }
-        },
+        //         if STATE.storage_offset == (len * BLOCK_SIZE) as usize {
+        //             command.pass();
+        //             STATE.storage_offset = 0;
+        //         }
+        //     } else {
+        //         command.pass();
+        //         STATE.storage_offset = 0;
+        //     }
+        // },
         ScsiCommand::ModeSense6 { .. } => {
             command.try_write_data_all(&[
                 0x03, // number of bytes that follow

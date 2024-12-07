@@ -1,0 +1,18 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.93"
+common = { version = "0.1.0", path = "../common" }
+nusb = "0.1.12"
+postcard = { version = "1.1.1", features = ["alloc"] }
+rand = "0.8.5"
+serde = { version = "1.0.215", features = ["derive"] }
+tokio = { version = "1.41.1", features = ["full"] }
+tokio-serial = "5.4.4"
+uom = "0.36.0"
+
+[patch.crates-io]
+postcard = { git = "https://github.com/ChocolateLoverRaj/postcard", branch = "range-max-size" }

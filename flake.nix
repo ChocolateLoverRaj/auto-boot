@@ -18,13 +18,15 @@
           buildInputs = [
             (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
               extensions = [ "rust-src" ];
-              targets = [ "thumbv6m-none-eabi" ];
+              targets = [ "thumbv6m-none-eabi"  "x86_64-unknown-linux-gnu"];
             }))
             elf2uf2-rs
             flip-link
             nil
             nixd
             probe-rs
+            libudev-zero
+            pkg-config
           ];
         };
       }
