@@ -1,4 +1,9 @@
-# Project template for rp2040-hal
+> [!WARNING]  
+> I no longer maintain this. It's not practical.
+
+What this does is it makes a RP2040 act as a USB storage device and basically chains a raw block device from UART to USB. I was able to successfully boot a ~15MiB operating system from UEFI firmware through this, but it was super slow. I can answer some questions maybe but I'm not going to work on the code for this.
+
+# Based on Project template for rp2040-hal
 
 This template is intended as a starting point for developing your own firmware based on the rp2040-hal.
 
